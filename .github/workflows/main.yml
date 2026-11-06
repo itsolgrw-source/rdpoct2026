@@ -1,49 +1,44 @@
-name: "FAISAL JAVED | IDEAL-TECH | Windows 11 RDP"
+name: "FAISAL JAVED | IDEAL-TECH | Windows RDP"
 
 on:
   workflow_dispatch:
 
 jobs:
   secure-rdp:
-    name: "IDEAL-TECH | Faisal Javed RDP Server"
+    name: "FAISAL JAVED | @IDEAL-TECH RDP"
     runs-on: windows-2022
     timeout-minutes: 350
 
     steps:
       - name: Configure Core RDP Settings
-        shell: powershell
         run: |
-          # Enable Remote Desktop and keep Network Level Authentication enabled.
+          # ORIGINAL RDP SETTINGS - kept as in the user's working workflow.
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" -Value 0 -Force
-
+                             -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" -Value 1 -Force
-
+                             -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "SecurityLayer" -Value 2 -Force
+                             -Name "SecurityLayer" -Value 0 -Force
 
-          # Remove an older rule with the same name, then allow RDP only from Tailscale IPs.
+          # Keep the original netsh firewall commands; do not use New-NetFirewallRule here.
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
 
-          New-NetFirewallRule -DisplayName "RDP-Tailscale" `
-            -Direction Inbound -Action Allow -Protocol TCP `
-            -LocalPort 3389 -RemoteAddress 100.64.0.0/10
+          # Original testing rule: allow incoming TCP 3389.
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
 
+          # Original service restart.
           Restart-Service -Name TermService -Force
 
       - name: Create IDEAL-TECH RDP User
-        shell: powershell
         run: |
           $username = "RDP"
           $password = "faisaljvd"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          $existingUser = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
-
-          if (-not $existingUser) {
-              New-LocalUser -Name $username -Password $securePass `
-                -AccountNeverExpires -Description "Faisal Javed | @IDEAL-TECH RDP User"
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires `
+                -Description "Faisal Javed | @IDEAL-TECH"
           } else {
               Set-LocalUser -Name $username -Password $securePass
           }
@@ -51,115 +46,88 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
 
+          "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
+
           if (-not (Get-LocalUser -Name $username)) {
-              Write-Error "RDP user creation failed."
+              Write-Error "RDP user creation failed"
               exit 1
           }
 
-          "RDP_USERNAME=$username" >> $env:GITHUB_ENV
-
-          Write-Host "RDP user configured for FAISAL JAVED | @IDEAL-TECH"
+          Write-Host "RDP user configured: Faisal Javed | @IDEAL-TECH"
 
       - name: Install Tailscale
-        shell: powershell
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
 
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe `
-            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
-            -Wait
-
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
-        shell: powershell
         run: |
-          $tailscaleExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          # Original Tailscale connection, with IDEAL-TECH hostname branding.
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=${{ secrets.TAILSCALE_AUTHKEY }} `
+            --hostname=ideal-tech-faisal-$env:GITHUB_RUN_ID
 
-          if (-not (Test-Path $tailscaleExe)) {
-              Write-Error "Tailscale executable was not found."
-              exit 1
-          }
-
-          & $tailscaleExe up `
-            --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" `
-            --hostname="ideal-tech-faisal-$env:GITHUB_RUN_ID"
-
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "Tailscale connection failed."
-              exit 1
-          }
-
+          # Wait for Tailscale to assign an IP.
           $tsIP = $null
           $retries = 0
 
-          while (-not $tsIP -and $retries -lt 12) {
-              $ipOutput = & $tailscaleExe ip -4
-              if ($ipOutput) {
-                  $tsIP = ($ipOutput | Select-Object -First 1).Trim()
-              }
-
-              if (-not $tsIP) {
-                  Start-Sleep -Seconds 5
-              }
-
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
               $retries++
           }
 
           if (-not $tsIP) {
-              Write-Error "Tailscale IP was not assigned."
+              Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
 
           "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       - name: Verify RDP Accessibility
-        shell: powershell
         run: |
-          Write-Host "========================================"
+          Write-Host ""
+          Write-Host "=========================================="
           Write-Host "       FAISAL JAVED | @IDEAL-TECH"
-          Write-Host "========================================"
+          Write-Host "=========================================="
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           Write-Host "Testing RDP TCP port 3389..."
 
-          $testResult = Test-NetConnection `
-            -ComputerName $env:TAILSCALE_IP -Port 3389 `
-            -WarningAction SilentlyContinue
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
 
           if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection test to RDP port 3389 failed."
+              Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
           }
 
-          Write-Host "RDP TCP connectivity test successful."
+          Write-Host "TCP connectivity successful!"
 
-      - name: Maintain Connection and Install Downloads.bat
-        shell: powershell
+      - name: Maintain Connection + Watch RDP User
         run: |
           Write-Host ""
-          Write-Host "=============================================="
+          Write-Host "================================================"
           Write-Host "          FAISAL JAVED | @IDEAL-TECH"
-          Write-Host "=============================================="
+          Write-Host "================================================"
           Write-Host "          WINDOWS REMOTE DESKTOP"
-          Write-Host "----------------------------------------------"
-          Write-Host "  Owner      : Faisal Javed"
-          Write-Host "  Brand      : @IDEAL-TECH"
-          Write-Host "  RDP Address: $env:TAILSCALE_IP"
-          Write-Host "  Username   : $env:RDP_USERNAME"
-          Write-Host "  Password   : [Use the password supplied in this workflow]"
-          Write-Host "----------------------------------------------"
+          Write-Host "------------------------------------------------"
+          Write-Host "Owner    : Faisal Javed"
+          Write-Host "Brand    : @IDEAL-TECH"
+          Write-Host "Address  : $env:TAILSCALE_IP"
+          Write-Host "Username : RDP"
+          Write-Host "Password : faisaljvd"
+          Write-Host "------------------------------------------------"
           Write-Host "          Powered by IDEAL-TECH"
-          Write-Host "=============================================="
-          Write-Host ""
+          Write-Host "================================================"
 
           $rdpProfile = "C:\Users\RDP"
           $startupPath = "$rdpProfile\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
           $downloadUrl = "https://gitlab.com/MR.English2008/pcme_rdp/-/raw/main/Downloads.bat"
-          $downloadPath = Join-Path $startupPath "Downloads.bat"
+          $downloadPath = "$startupPath\Downloads.bat"
 
-          # Wait until the RDP user profile exists, then download the batch file.
           while ($true) {
               if (Test-Path $rdpProfile) {
                   try {
@@ -168,55 +136,43 @@ jobs:
                       }
 
                       Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
+                      Write-Host "Downloads.bat copied to $downloadPath"
 
-                      if (-not (Test-Path $downloadPath)) {
-                          throw "Downloads.bat was not saved."
-                      }
-
-                      Write-Host "Downloads.bat copied to the RDP Startup folder."
-
-                      # Run the downloaded batch file once.
-                      cmd.exe /c "`"$downloadPath`""
-
-                      if ($LASTEXITCODE -ne 0) {
-                          Write-Warning "Downloads.bat returned exit code $LASTEXITCODE."
-                      } else {
-                          Write-Host "Downloads.bat execution completed."
-                      }
-
+                      # Run the batch file for the first time.
+                      cmd /c $downloadPath
+                      Write-Host "Downloads.bat execution completed."
                       break
                   }
                   catch {
-                      Write-Error "Downloads.bat error: $($_.Exception.Message)"
-                      throw
+                      Write-Host "Error copying or executing Downloads.bat: $($_.Exception.Message)"
+                      break
                   }
               }
-
-              Write-Host "[$(Get-Date)] Waiting for the RDP user profile..."
-              Start-Sleep -Seconds 30
+              else {
+                  Write-Host "[$(Get-Date)] Waiting for RDP profile to be created..."
+                  Start-Sleep -Seconds 30
+              }
           }
 
-          # Keep the GitHub Actions runner alive until the workflow timeout.
+          # Keep runner alive, as in the original workflow.
           while ($true) {
-              Write-Host "[$(Get-Date)] FAISAL JAVED | @IDEAL-TECH - RDP runner active."
+              Write-Host "[$(Get-Date)] FAISAL JAVED | @IDEAL-TECH - RDP Active"
               Start-Sleep -Seconds 300
           }
 
 # RDP LOGIN DETAILS
+# Owner: Faisal Javed
+# Brand: @IDEAL-TECH
 # Username: RDP
 # Password: faisaljvd
+# Address: TAILSCALE_IP:3389 (shown in workflow logs)
 #
-# Tailscale IP is printed in the workflow logs.
-# Connect using: <TAILSCALE_IP>:3389
-#
-# Required GitHub repository secret:
+# REQUIRED GITHUB REPOSITORY SECRET:
 # TAILSCALE_AUTHKEY
 #
-# SECURITY:
-# - This workflow uses a fixed password as requested. Anyone who can read this
-#   file can see it. Use a strong unique password and GitHub Secrets for
-#   long-term or shared use.
-# - Keep Tailscale auth keys private. Prefer a short-lived, tagged, reusable
-#   auth key only when required by your Tailscale policy.
-# - GitHub-hosted runners are temporary; the RDP machine ends when the job ends
-#   or reaches its timeout.
+# SECURITY NOTE:
+# This file contains the requested fixed password in plain text.
+# Keep this file private. For safer use, store the password in GitHub Secrets
+# and use a strong, unique password. The original firewall rule allows TCP
+# port 3389 from any source; use only in a trusted/isolated test environment.
+# GitHub-hosted runners are temporary and stop when the job ends or times out.
