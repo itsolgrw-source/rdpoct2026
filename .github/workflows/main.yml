@@ -12,7 +12,7 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # ORIGINAL RDP SETTINGS - kept as in the user's working workflow.
+          # Original RDP settings retained from the user's first workflow.
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
@@ -20,15 +20,52 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
 
-          # Keep the original netsh firewall commands; do not use New-NetFirewallRule here.
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
 
-          # Original testing rule: allow incoming TCP 3389.
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
 
-          # Original service restart.
           Restart-Service -Name TermService -Force
+
+      - name: Apply Local Password Policy for Requested Password
+        run: |
+          # The requested password "faisaljvd" is 9 characters but contains
+          # lowercase letters only. Windows password complexity may reject it.
+          # Attempt to relax the RUNNER'S LOCAL password policy before creating
+          # the local RDP account. A domain-enforced policy may still override this.
+          $policyFile = Join-Path $env:TEMP "ideal-tech-secpol.inf"
+          $dbFile = Join-Path $env:TEMP "ideal-tech-secpol.sdb"
+
+          secedit.exe /export /cfg $policyFile | Out-Null
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $policyFile)) {
+              throw "Could not export local security policy."
+          }
+
+          $policy = Get-Content $policyFile -Raw
+
+          if ($policy -match '(?m)^PasswordComplexity\s*=') {
+              $policy = [regex]::Replace($policy, '(?m)^PasswordComplexity\s*=.*$', 'PasswordComplexity = 0')
+          } else {
+              $policy += "`r`nPasswordComplexity = 0`r`n"
+          }
+
+          if ($policy -match '(?m)^MinimumPasswordLength\s*=') {
+              $policy = [regex]::Replace($policy, '(?m)^MinimumPasswordLength\s*=.*$', 'MinimumPasswordLength = 8')
+          } else {
+              $policy += "`r`nMinimumPasswordLength = 8`r`n"
+          }
+
+          if ($policy -match '(?m)^PasswordHistorySize\s*=') {
+              $policy = [regex]::Replace($policy, '(?m)^PasswordHistorySize\s*=.*$', 'PasswordHistorySize = 0')
+          } else {
+              $policy += "`r`nPasswordHistorySize = 0`r`n"
+          }
+
+          Set-Content -Path $policyFile -Value $policy -Encoding Unicode
+          secedit.exe /configure /db $dbFile /cfg $policyFile /areas SECURITYPOLICY
+          if ($LASTEXITCODE -ne 0) {
+              throw "Could not apply local password policy. A domain policy may be enforcing stronger requirements."
+          }
 
       - name: Create IDEAL-TECH RDP User
         run: |
@@ -36,7 +73,9 @@ jobs:
           $password = "faisaljvd"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+          $existingUser = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+
+          if (-not $existingUser) {
               New-LocalUser -Name $username -Password $securePass -AccountNeverExpires `
                 -Description "Faisal Javed | @IDEAL-TECH"
           } else {
@@ -46,14 +85,12 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
 
-          "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
-
           if (-not (Get-LocalUser -Name $username)) {
-              Write-Error "RDP user creation failed"
-              exit 1
+              throw "RDP user creation failed."
           }
 
-          Write-Host "RDP user configured: Faisal Javed | @IDEAL-TECH"
+          "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
+          Write-Host "RDP account created/updated for FAISAL JAVED | @IDEAL-TECH."
 
       - name: Install Tailscale
         run: |
@@ -66,15 +103,12 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
-          # Original Tailscale connection, with IDEAL-TECH hostname branding.
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
             --authkey=${{ secrets.TAILSCALE_AUTHKEY }} `
             --hostname=ideal-tech-faisal-$env:GITHUB_RUN_ID
 
-          # Wait for Tailscale to assign an IP.
           $tsIP = $null
           $retries = 0
-
           while (-not $tsIP -and $retries -lt 10) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5
@@ -90,15 +124,12 @@ jobs:
 
       - name: Verify RDP Accessibility
         run: |
-          Write-Host ""
           Write-Host "=========================================="
           Write-Host "       FAISAL JAVED | @IDEAL-TECH"
           Write-Host "=========================================="
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Testing RDP TCP port 3389..."
 
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
@@ -118,7 +149,7 @@ jobs:
           Write-Host "Brand    : @IDEAL-TECH"
           Write-Host "Address  : $env:TAILSCALE_IP"
           Write-Host "Username : RDP"
-          Write-Host "Password : faisaljvd"
+          Write-Host "Password : [configured as requested]"
           Write-Host "------------------------------------------------"
           Write-Host "          Powered by IDEAL-TECH"
           Write-Host "================================================"
@@ -138,7 +169,6 @@ jobs:
                       Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
                       Write-Host "Downloads.bat copied to $downloadPath"
 
-                      # Run the batch file for the first time.
                       cmd /c $downloadPath
                       Write-Host "Downloads.bat execution completed."
                       break
@@ -154,25 +184,27 @@ jobs:
               }
           }
 
-          # Keep runner alive, as in the original workflow.
           while ($true) {
               Write-Host "[$(Get-Date)] FAISAL JAVED | @IDEAL-TECH - RDP Active"
               Start-Sleep -Seconds 300
           }
 
 # RDP LOGIN DETAILS
-# Owner: Faisal Javed
-# Brand: @IDEAL-TECH
 # Username: RDP
 # Password: faisaljvd
+# Brand: FAISAL JAVED | @IDEAL-TECH
 # Address: TAILSCALE_IP:3389 (shown in workflow logs)
 #
-# REQUIRED GITHUB REPOSITORY SECRET:
-# TAILSCALE_AUTHKEY
+# Required GitHub repository secret: TAILSCALE_AUTHKEY
 #
-# SECURITY NOTE:
-# This file contains the requested fixed password in plain text.
-# Keep this file private. For safer use, store the password in GitHub Secrets
-# and use a strong, unique password. The original firewall rule allows TCP
-# port 3389 from any source; use only in a trusted/isolated test environment.
-# GitHub-hosted runners are temporary and stop when the job ends or times out.
+# IMPORTANT:
+# This workflow attempts to relax the runner's LOCAL password complexity
+# policy to permit the requested lowercase-only password. If an organization
+# or domain policy enforces password complexity, the requested password may
+# still be rejected; use a password that meets that policy in that case.
+#
+# SECURITY:
+# The original firewall rule allows TCP 3389 from any source. Use only in a
+# trusted/isolated test environment. The requested fixed password is weak and
+# is included in this file; keep the file private. GitHub-hosted runners are
+# temporary and stop when the job ends or reaches its timeout.
